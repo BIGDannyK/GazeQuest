@@ -1,0 +1,18 @@
+# Python 관련 제외
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Unity 관련 제외 (매우 중요)
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Logs]/
+MemoryCaptures/
+AssetStoreTools*
+/Assets/AssetStoreTools*
+*.csproj
+*.unitypackage
+*.sln
