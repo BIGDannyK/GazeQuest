@@ -29,18 +29,23 @@ warning_msg, warning_timer = "", 0
 
 # 벡터 이동 관련
 dot_x, dot_y = 0.5, 0.5
-MOVE_SPEED = 0.012      # 점이 흐르는 속도
-DEADZONE = 0.20         # 멈춤 범위 확장 (0.15 -> 0.20)
+MOVE_SPEED = 0.012      
+DEADZONE = 0.20         
+
+# 제스처(입 벌리기) 관련
+is_locked = False           # 현재 커서가 고정되었는지 여부
+mouth_cooldown = 0          # 입 벌림 중복 인식 방지 타이머
+MOUTH_THRESHOLD = 0.04      # 입 벌림 감지 임계값 (거리가 이보다 크면 인식)
 
 # 시선 값 부드럽게 (떨림 방지)
 raw_smoothed_x, raw_smoothed_y = 0.5, 0.5
-ALPHA = 0.2             # 시선 필터링 계수
+ALPHA = 0.2             
 
 last_print_time = 0
 PRINT_INTERVAL = 0.5 
 
 cap = cv2.VideoCapture(0)
-window_name = "GazeQuest - Vector Control (Large Deadzone)"
+window_name = "GazeQuest - Mouth Gesture Lock"
 
 while cap.isOpened():
     ret, frame = cap.read()
@@ -55,14 +60,31 @@ while cap.isOpened():
 
     if detection_result.face_landmarks:
         face_landmarks = detection_result.face_landmarks[0]
+        
+        # 1. 눈동자 위치 파악
         left_iris = face_landmarks[468]
         current_iris_x = int(left_iris.x * w)
         current_iris_y = int(left_iris.y * h)
         cv2.circle(frame, (current_iris_x, current_iris_y), 3, (0, 255, 0), -1)
 
+        # 2. 입 벌리기 제스처 감지 (랜드마크 13: 윗입술 안쪽, 14: 아랫입술 안쪽)
+        upper_lip = face_landmarks[13]
+        lower_lip = face_landmarks[14]
+        mouth_dist = abs(upper_lip.y - lower_lip.y)
+
+        if mouth_dist > MOUTH_THRESHOLD and mouth_cooldown == 0:
+            is_locked = not is_locked  # 상태 반전 (토글)
+            mouth_cooldown = 20        # 약 0.6~1초간 쿨타임 (연속 인식 방지)
+            warning_msg = "CURSOR LOCKED" if is_locked else "CURSOR UNLOCKED"
+            warning_timer = 60
+
+        if mouth_cooldown > 0:
+            mouth_cooldown -= 1
+
     # UI 알림 표시
     if warning_timer > 0:
-        cv2.putText(frame, warning_msg, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
+        msg_color = (0, 0, 255) if is_locked else (0, 255, 0)
+        cv2.putText(frame, warning_msg, (w//2 - 100, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, msg_color, 2)
         warning_timer -= 1
 
     # --- Step 1: Calibration ---
@@ -76,48 +98,47 @@ while cap.isOpened():
     # --- Step 2: Vector Tracking ---
     else:
         if current_iris_x != 0 and current_iris_y != 0:
-            # 1. 시선 좌표 정규화 (0.0 ~ 1.0)
+            # 1. 시선 좌표 정규화 및 필터링
             target_raw_x = np.interp(current_iris_x, [calib_tl[0], calib_br[0]], [0.0, 1.0])
             target_raw_y = np.interp(current_iris_y, [calib_tl[1], calib_br[1]], [0.0, 1.0])
-            
-            # 2. 노이즈 필터링
             raw_smoothed_x = ALPHA * target_raw_x + (1 - ALPHA) * raw_smoothed_x
             raw_smoothed_y = ALPHA * target_raw_y + (1 - ALPHA) * raw_smoothed_y
 
-            # 3. 벡터 결정 (0.5 - DEADZONE ~ 0.5 + DEADZONE 사이면 0)
+            # 2. 벡터 결정
             vx, vy = 0, 0
             if raw_smoothed_x < (0.5 - DEADZONE):   vx = -1
             elif raw_smoothed_x > (0.5 + DEADZONE): vx = 1
-            
             if raw_smoothed_y < (0.5 - DEADZONE):   vy = -1
             elif raw_smoothed_y > (0.5 + DEADZONE): vy = 1
 
-            # 4. 빨간 점 위치 업데이트 및 경계 제한
-            dot_x = np.clip(dot_x + vx * MOVE_SPEED, 0.0, 1.0)
-            dot_y = np.clip(dot_y + vy * MOVE_SPEED, 0.0, 1.0)
+            # 3. [핵심] 고정 상태가 아닐 때만 점 이동
+            if not is_locked:
+                dot_x = np.clip(dot_x + vx * MOVE_SPEED, 0.0, 1.0)
+                dot_y = np.clip(dot_y + vy * MOVE_SPEED, 0.0, 1.0)
 
             # --- 시각적 피드백 ---
-            # 하얀 사각형: 멈춤 구간 (DEADZONE) 시각화
+            # 데드존 가이드
             dz_x1, dz_y1 = int(w*(0.5-DEADZONE)), int(h*(0.5-DEADZONE))
             dz_x2, dz_y2 = int(w*(0.5+DEADZONE)), int(h*(0.5+DEADZONE))
             cv2.rectangle(frame, (dz_x1, dz_y1), (dz_x2, dz_y2), (255, 255, 255), 1)
             
-            # 청록색 점: 현재 내 시선 위치
+            # 현재 시선 표시 (청록색 점)
             cv2.circle(frame, (int(raw_smoothed_x * w), int(raw_smoothed_y * h)), 5, (255, 255, 0), -1)
 
-            # 빨간 큰 점: 조종되는 결과물
-            cv2.circle(frame, (int(dot_x * w), int(dot_y * h)), 15, (0, 0, 255), -1)
+            # 최종 빨간 점 (고정 시 색상 변경)
+            dot_color = (100, 100, 100) if is_locked else (0, 0, 255)
+            cv2.circle(frame, (int(dot_x * w), int(dot_y * h)), 15, dot_color, -1)
             
-            # 상태 정보 표시
-            is_stopped = (vx == 0 and vy == 0)
-            state_text = "STOPPED" if is_stopped else f"MOVING ({vx}, {vy})"
-            color = (0, 255, 0) if is_stopped else (0, 165, 255)
-            cv2.putText(frame, f"STATUS: {state_text}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            # 상태 표시
+            state_text = "LOCKED (Open mouth to unlock)" if is_locked else f"MOVING ({vx}, {vy})"
+            status_color = (0, 0, 255) if is_locked else (0, 255, 0)
+            cv2.putText(frame, f"STATUS: {state_text}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_color, 2)
 
-            # 터미널 로그 출력
+            # 터미널 로그
             current_time = time.time()
             if current_time - last_print_time >= PRINT_INTERVAL:
-                print(f"[{state_text}] Dot:({dot_x:.2f}, {dot_y:.2f}) | Gaze:({raw_smoothed_x:.2f}, {raw_smoothed_y:.2f})")
+                lock_status = "LOCKED" if is_locked else "ACTIVE"
+                print(f"[{lock_status}] Dot:({dot_x:.2f}, {dot_y:.2f}) | MouthDist: {mouth_dist:.3f}")
                 last_print_time = current_time
 
     cv2.imshow(window_name, frame)
@@ -127,6 +148,7 @@ while cap.isOpened():
         break
     elif key == ord('r') or key == ord('R'):
         is_calibrated = False
+        is_locked = False
         calib_tl, calib_br = None, None
         dot_x, dot_y = 0.5, 0.5
         warning_msg, warning_timer = "RESET ALL!", 60
@@ -136,7 +158,6 @@ while cap.isOpened():
     elif key == ord('2') and calib_tl is not None and detection_result.face_landmarks:
         calib_br = (current_iris_x, current_iris_y)
         is_calibrated = True
-        print("Calibration Complete!")
 
 cap.release()
 cv2.destroyAllWindows()
