@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>측정 결과 리포트</title>
+    <style>
+        body { font-family: 'Pretendard', sans-serif; background: #f4f7f9; color: #333; padding: 40px; }
+        .container { max-width: 900px; margin: 0 auto; background: white; padding: 30px; border-radius: 15px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
+        h1 { color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }
+        .summary-card { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }
+        .card { background: #ebf5fb; padding: 20px; border-radius: 10px; text-align: center; }
+        .card h3 { margin: 0; font-size: 14px; color: #5dade2; }
+        .card p { margin: 10px 0 0; font-size: 24px; font-weight: bold; color: #2e86c1; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { padding: 12px; border-bottom: 1px solid #ddd; text-align: left; }
+        th { background-color: #f8f9fa; }
+        .btn { display: inline-block; padding: 10px 20px; background: #3498db; color: white; text-decoration: none; border-radius: 5px; margin-top: 20px; cursor: pointer; border: none; }
+        .btn-danger { background: #e74c3c; }
+        .btn:hover { opacity: 0.8; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📊 Game Analysis Report</h1>
+        
+        <div class="summary-card" id="summary">
+            <!-- 요약 데이터가 여기에 들어감 -->
+        </div>
+
+        <h3>최근 게임 기록</h3>
+        <table id="historyTable">
+            <thead>
+                <tr>
+                    <th>날짜</th>
+                    <th>게임</th>
+                    <th>소요시간</th>
+                    <th>이벤트 수</th>
+                    <th>결과 요약</th>
+                </tr>
+            </thead>
+            <tbody>
+                <!-- 상세 기록이 여기에 들어감 -->
+            </tbody>
+        </table>
+
+        <div style="display: flex; gap: 10px;">
+            <a href="../index.html" class="btn">◀ 메인으로 이동</a>
+            <button onclick="clearHistory()" class="btn btn-danger">데이터 초기화</button>
+        </div>
+    </div>
+
+    <script>
+        function loadReport() {
+            const history = JSON.parse(localStorage.getItem('game_history') || '[]');
+            const tableBody = document.querySelector('#historyTable tbody');
+            const summaryDiv = document.getElementById('summary');
+
+            if (history.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="5" style="text-align:center;">기록이 없습니다. 게임을 먼저 플레이하세요!</td></tr>';
+                return;
+            }
+
+            // 역순으로 정렬 (최신순)
+            history.reverse().forEach(session => {
+                const row = document.createElement('tr');
+                
+                // 결과 요약 텍스트 생성
+                let summaryText = "";
+                if (session.game === 'fruit') {
+                    const hits = session.events.filter(e => e.name === 'fruit_sliced').length;
+                    summaryText = `점수: ${hits}점`;
+                } else if (session.game === 'sniper') {
+                    const hits = session.events.filter(e => e.name === 'dwell_success').length;
+                    summaryText = `격파: ${hits}개`;
+                } else if (session.game === 'rhythm') {
+                    const endEvt = session.events.find(e => e.name === 'slider_end');
+                    summaryText = `일치율: ${endEvt ? endEvt.completionRate : 0}%`;
+                }
+
+                row.innerHTML = `
+                    <td>${new Date(session.date).toLocaleString()}</td>
+                    <td><b>${session.game.toUpperCase()}</b></td>
+                    <td>${session.duration.toFixed(1)}s</td>
+                    <td>${session.samples.length} pts</td>
+                    <td>${summaryText}</td>
+                `;
+                tableBody.appendChild(row);
+            });
+
+            // 간단한 요약 카드 생성
+            summaryDiv.innerHTML = `
+                <div class="card"><h3>총 게임 횟수</h3><p>${history.length}</p></div>
+                <div class="card"><h3>최근 플레이</h3><p>${history[0].game.toUpperCase()}</p></div>
+            `;
+        }
+
+        function clearHistory() {
+            if (confirm('모든 기록을 삭제하시겠습니까?')) {
+                localStorage.removeItem('game_history');
+                location.reload();
+            }
+        }
+
+        window.onload = loadReport;
+    </script>
+</body>
+</html>
