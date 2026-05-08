@@ -2,21 +2,41 @@ window.Pointer = {
     x: 0,
     y: 0,
     isValid: false,
+    socket: null,
 
     init() {
-        window.addEventListener('mousemove', (e) => {
-            this.x = e.clientX;
-            this.y = e.clientY;
-            this.isValid = true;
+        // 1. Python Flask-SocketIO 서버에 연결 (main.py에서 설정한 5000 포트)
+        this.socket = io("http://localhost:5000");
 
-            if (window.Tracker && window.Tracker.isTracking) {
-                window.Tracker.onSample(this.x, this.y);
-            }
+        this.socket.on("connect", () => {
+            console.log("✅ Gaze Server connected!");
         });
-        console.log("🖱️ Pointer calibrated.");
+
+        // 2. 'gaze_data' 이벤트 수신
+        this.socket.on("gaze_data", (data) => {
+            // 정규화된 좌표(0~1)를 브라우저 픽셀 좌표로 변환
+            this.updatePosition(data.x * window.innerWidth, data.y * window.innerHeight);
+        });
+
+        // (옵션) 마우스 이동도 병행하고 싶다면 유지, 시선만 쓰고 싶다면 삭제하세요.
+        window.addEventListener('mousemove', (e) => {
+            this.updatePosition(e.clientX, e.clientY);
+        });
+
+        console.log("🖱️ Pointer calibrated & Socket connected.");
     },
 
-    // 특정 엘리먼트(캔버스) 내부의 상대 좌표를 계산하는 핵심 함수
+    // 좌표 갱신 및 외부 모듈(Tracker 등) 알림 통합 함수
+    updatePosition(nx, ny) {
+        this.x = nx;
+        this.y = ny;
+        this.isValid = true;
+
+        if (window.Tracker && window.Tracker.isTracking) {
+            window.Tracker.onSample(this.x, this.y);
+        }
+    },
+
     getRelativeCoords(canvas) {
         const rect = canvas.getBoundingClientRect();
         return {

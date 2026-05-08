@@ -27,6 +27,13 @@ options = vision.FaceLandmarkerOptions(
 detector = vision.FaceLandmarker.create_from_options(options)
 
 # ─────────────────────────────────────────────
+#  SAVE SETUP (추가된 부분)
+# ─────────────────────────────────────────────
+SAVE_DIR = os.path.join("src", "core")
+os.makedirs(SAVE_DIR, exist_ok=True)
+LOG_FILE_PATH = os.path.join(SAVE_DIR, "gaze_log.txt")
+
+# ─────────────────────────────────────────────
 #  ONE EURO FILTER
 # ─────────────────────────────────────────────
 class OneEuroFilter:
@@ -170,7 +177,7 @@ MOVE_SPEED      = 0.012
 DEADZONE        = 0.28
 MOUTH_THRESHOLD = 0.04
 MOUTH_CD_MAX    = 20
-PRINT_INTERVAL  = 0.5
+PRINT_INTERVAL  = 0.01
 WIN_W, WIN_H    = 960, 720
 
 
@@ -350,8 +357,13 @@ while cap.isOpened():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_color, 2)
 
             if now - last_print_time >= PRINT_INTERVAL:
-                print(f"[{'LOCKED' if is_locked else 'ACTIVE'}] "
-                      f"Dot:({dot_x:.2f},{dot_y:.2f}) | Mouth:{mouth_dist:.3f}")
+                status = 'LOCKED' if is_locked else 'ACTIVE'
+                # 'a' 모드를 사용하여 기존 데이터 뒤에 이어서 작성합니다.
+                with open(LOG_FILE_PATH, "a", encoding="utf-8") as f:
+                    # 형식: 타임스탬프, 상태, X좌표, Y좌표, 입벌림수치
+                    log_entry = (f"{time.strftime('%H:%M:%S', time.localtime(now))}, "
+                                f"{status}, {dot_x:.4f}, {dot_y:.4f}, {mouth_dist:.4f}\n")
+                    f.write(log_entry)
                 last_print_time = now
 
     if warning_timer > 0:
@@ -390,3 +402,4 @@ while cap.isOpened():
 
 cap.release()
 cv2.destroyAllWindows()
+
