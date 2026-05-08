@@ -36,7 +36,7 @@ class OneEuroFilter:
         self.beta       = beta
         self.d_cutoff   = d_cutoff
         self.x_prev     = None
-        self.dx_prev    = 0.0
+        self.dx_prev     = 0.0
         self.t_prev     = None
 
     def _alpha(self, cutoff):
@@ -72,10 +72,6 @@ class OneEuroFilter:
 
 # ─────────────────────────────────────────────
 #  5-POINT CALIBRATION
-#
-#  5개 포인트(모서리 4 + 중앙 1)에서 눈동자 좌표를 샘플링하고
-#  least-squares affine 변환으로 매핑 행렬을 추정.
-#  2포인트 선형 보간 대비 중앙부 정확도가 크게 향상됨.
 # ─────────────────────────────────────────────
 MARGIN = 0.08
 
@@ -95,7 +91,7 @@ CALIB_LABELS = [
     "BOTTOM-RIGHT",
 ]
 
-CALIB_SAMPLES = 20   # 포인트당 누적 프레임 수 (평균 냄)
+CALIB_SAMPLES = 20   # 포인트당 누적 프레임 수
 
 
 class Calibration:
@@ -130,7 +126,6 @@ class Calibration:
         avg_x = float(np.mean([s[0] for s in self.sample_buf]))
         avg_y = float(np.mean([s[1] for s in self.sample_buf]))
         self.iris_pts.append((avg_x, avg_y))
-        # 첫 포인트에서 중립 머리 방향 저장
         if self.step == 0 and lms is not None:
             self.neutral_nose_x = lms[1].x - lms[6].x
             self.neutral_nose_y = lms[1].y - lms[6].y
@@ -142,7 +137,7 @@ class Calibration:
 
     def _fit(self):
         src = np.array([[ix, iy, 1.0] for ix, iy in self.iris_pts], dtype=np.float64)
-        dst = np.array(list(CALIB_TARGETS),                          dtype=np.float64)
+        dst = np.array(list(CALIB_TARGETS),                         dtype=np.float64)
         M_T, _, _, _ = np.linalg.lstsq(src, dst, rcond=None)
         self.M     = M_T.T   # shape (2, 3)
         self.ready = True
@@ -176,7 +171,7 @@ DEADZONE        = 0.28
 MOUTH_THRESHOLD = 0.04
 MOUTH_CD_MAX    = 20
 PRINT_INTERVAL  = 0.5
-WIN_W, WIN_H    = 960, 720   # 초기 창 크기
+WIN_W, WIN_H    = 960, 720
 
 
 # ─────────────────────────────────────────────
@@ -190,7 +185,6 @@ def draw_calib_screen(frame, calib, sampling_active, w, h):
     label     = CALIB_LABELS[calib.step]
     progress  = len(calib.sample_buf) / CALIB_SAMPLES if sampling_active else 0.0
 
-    # 안내 텍스트
     if sampling_active:
         guide = f"Step {calib.step+1}/5: Sampling {label} ...  (hold still)"
         g_col = (0, 220, 100)
@@ -199,20 +193,17 @@ def draw_calib_screen(frame, calib, sampling_active, w, h):
         g_col = (0, 200, 255)
     cv2.putText(frame, guide, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.62, g_col, 2)
 
-    # 타겟 원
     cv2.circle(frame, (tx, ty), 24, (255, 255, 255), 2)
     if int(time.time() * 3) % 2 == 0:
         cv2.circle(frame, (tx, ty), 7, (0, 60, 255), -1)
     else:
         cv2.circle(frame, (tx, ty), 7, (0, 120, 255), -1)
-    # 진행 호
     if progress > 0:
         cv2.ellipse(frame, (tx, ty), (24, 24), -90,
                     0, int(360 * progress), (0, 220, 100), 3)
     cv2.putText(frame, label, (tx - 40, ty + 40),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
 
-    # 완료된 포인트 체크
     for i in range(calib.step):
         dtx = int(CALIB_TARGETS[i][0] * w)
         dty = int(CALIB_TARGETS[i][1] * h)
@@ -220,7 +211,6 @@ def draw_calib_screen(frame, calib, sampling_active, w, h):
         cv2.putText(frame, "v", (dtx - 5, dty + 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
-    # 하단 진행 바
     bx, by, bw, bh = 10, h - 28, w - 20, 12
     cv2.rectangle(frame, (bx, by), (bx+bw, by+bh), (45, 45, 45), -1)
     if progress > 0:
@@ -235,8 +225,8 @@ def draw_calib_screen(frame, calib, sampling_active, w, h):
 #  MAIN
 # ─────────────────────────────────────────────
 calib           = Calibration()
-filter_x        = OneEuroFilter()
-filter_y        = OneEuroFilter()
+filter_x         = OneEuroFilter()
+filter_y         = OneEuroFilter()
 
 dot_x, dot_y    = 0.5, 0.5
 is_locked       = False
@@ -247,7 +237,7 @@ last_print_time = 0
 detection_result = None
 mouth_dist      = 0.0
 sampling_active = False
-lms             = None   # 마지막 face landmarks
+lms             = None
 
 window_name = "GazeQuest - Vision Module"
 cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -275,19 +265,16 @@ while cap.isOpened():
     if face_ok:
         lms = detection_result.face_landmarks[0]
 
-        # 양쪽 눈 평균
         li, ri      = lms[468], lms[473]
         iris_norm_x = (li.x + ri.x) / 2.0
         iris_norm_y = (li.y + ri.y) / 2.0
         current_iris_x = int(iris_norm_x * w_cam)
         current_iris_y = int(iris_norm_y * h_cam)
 
-        # 눈동자 점
         cv2.circle(frame, (int(li.x*w_cam), int(li.y*h_cam)), 3, (0, 255, 100), -1)
         cv2.circle(frame, (int(ri.x*w_cam), int(ri.y*h_cam)), 3, (0, 255, 100), -1)
         cv2.circle(frame, (current_iris_x, current_iris_y), 4, (0, 200, 255), -1)
 
-        # 입 벌리기 (트래킹 중에만)
         if calib.done:
             mouth_dist = abs(lms[13].y - lms[14].y)
             if mouth_dist > MOUTH_THRESHOLD and mouth_cooldown == 0:
@@ -298,9 +285,7 @@ while cap.isOpened():
             if mouth_cooldown > 0:
                 mouth_cooldown -= 1
 
-    # ── 캘리브레이션 단계 ──
     if not calib.done:
-        # 샘플 자동 누적
         if sampling_active and face_ok:
             calib.add_sample(iris_norm_x, iris_norm_y)
             if len(calib.sample_buf) >= CALIB_SAMPLES:
@@ -316,37 +301,46 @@ while cap.isOpened():
             cv2.putText(frame, "[ Face not detected ]", (10, 70),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-    # ── 트래킹 단계 ──
     else:
         if face_ok and iris_norm_x != 0.0:
-            # 머리 회전 보정
             off_x, off_y = get_head_offset(lms, calib)
             comp_x = iris_norm_x - off_x
             comp_y = iris_norm_y - off_y
 
-            # Affine 매핑
             mapped_x, mapped_y = calib.map(comp_x, comp_y)
 
-            # One Euro Filter
             sx = filter_x.filter(mapped_x, timestamp=now)
             sy = filter_y.filter(mapped_y, timestamp=now)
 
-            # 벡터
-            vx = -1 if sx < (0.5 - DEADZONE) else (1 if sx > (0.5 + DEADZONE) else 0)
-            vy = -1 if sy < (0.5 - DEADZONE) else (1 if sy > (0.5 + DEADZONE) else 0)
+            # 1. 중심(0.5, 0.5)으로부터의 거리와 방향 계산
+            dx = sx - 0.5
+            dy = sy - 0.5
+            dist = np.sqrt(dx**2 + dy**2)
+
+            # 2. 원형 경계(DEADZONE)를 기준으로 한 속도 계산
+            if dist > DEADZONE:
+                # (현재거리 - 반지름)을 통해 경계 밖으로 벗어난 정도를 구함
+                # 이 값이 커질수록 이동 속도가 증가함
+                speed_factor = dist - DEADZONE
+                
+                # 방향 벡터(정규화)에 거리 기반 속도 계수를 곱함
+                vx = (dx / dist) * speed_factor
+                vy = (dy / dist) * speed_factor
+            else:
+                # 원 안에 있을 때는 속도 0
+                vx, vy = 0.0, 0.0
 
             if not is_locked:
                 dot_x = float(np.clip(dot_x + vx * MOVE_SPEED, 0.0, 1.0))
                 dot_y = float(np.clip(dot_y + vy * MOVE_SPEED, 0.0, 1.0))
 
-            # 데드존
-            cv2.rectangle(frame,
-                          (int(w_cam*(0.5-DEADZONE)), int(h_cam*(0.5-DEADZONE))),
-                          (int(w_cam*(0.5+DEADZONE)), int(h_cam*(0.5+DEADZONE))),
-                          (200, 200, 200), 1)
-            # 필터 시선 (노란 점)
+            # ─── 수정된 부분: 데드존 시각화를 사각형에서 원으로 변경 ───
+            center_x, center_y = int(w_cam * 0.5), int(h_cam * 0.5)
+            radius = int(DEADZONE * w_cam)
+            cv2.circle(frame, (center_x, center_y), radius, (200, 200, 200), 1)
+            # ──────────────────────────────────────────────────────────
+
             cv2.circle(frame, (int(sx*w_cam), int(sy*h_cam)), 6, (0, 220, 255), -1)
-            # 커서
             dot_color = (0, 165, 255) if is_locked else (0, 0, 255)
             cv2.circle(frame, (int(dot_x*w_cam), int(dot_y*h_cam)), 15, dot_color, -1)
 
@@ -360,36 +354,33 @@ while cap.isOpened():
                       f"Dot:({dot_x:.2f},{dot_y:.2f}) | Mouth:{mouth_dist:.3f}")
                 last_print_time = now
 
-    # 경고 메시지
     if warning_timer > 0:
         msg_col = (0, 60, 255) if is_locked else (0, 220, 60)
         cv2.putText(frame, warning_msg, (w_cam//2 - 140, 75),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.85, msg_col, 2)
         warning_timer -= 1
 
-    # 창 리사이징
     rect = cv2.getWindowImageRect(window_name)
     if rect and rect[2] > 0 and rect[3] > 0:
         cv2.imshow(window_name,
                    cv2.resize(frame, (rect[2], rect[3]),
-                              interpolation=cv2.INTER_LINEAR))
+                               interpolation=cv2.INTER_LINEAR))
     else:
         cv2.imshow(window_name, frame)
 
-    # ── 키 입력 ──
     key = cv2.waitKey(1) & 0xFF
 
     if key == 27 or cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
         break
 
-    elif key == ord(' '):   # SPACE: 현재 포인트 샘플링 시작
+    elif key == ord(' '):
         if not calib.done and face_ok and not sampling_active:
             sampling_active = True
 
     elif key == ord('r') or key == ord('R'):
         calib           = Calibration()
-        filter_x        = OneEuroFilter()
-        filter_y        = OneEuroFilter()
+        filter_x         = OneEuroFilter()
+        filter_y         = OneEuroFilter()
         dot_x, dot_y    = 0.5, 0.5
         is_locked       = False
         sampling_active = False
