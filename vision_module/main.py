@@ -4,8 +4,15 @@ import urllib.request
 import os
 import mediapipe as mp
 import time
+import pyautogui
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
+
+# ─────────────────────────────────────────────
+#  PYAUTOGUI SETUP (마우스 제어 설정)
+# ─────────────────────────────────────────────
+pyautogui.FAILSAFE = False  # 화면 모서리 강제 종료 방지
+SCREEN_WIDTH, SCREEN_HEIGHT = pyautogui.size()
 
 # ─────────────────────────────────────────────
 #  MODEL SETUP
@@ -27,14 +34,7 @@ options = vision.FaceLandmarkerOptions(
 detector = vision.FaceLandmarker.create_from_options(options)
 
 # ─────────────────────────────────────────────
-#  SAVE SETUP (추가된 부분)
-# ─────────────────────────────────────────────
-SAVE_DIR = os.path.join("src", "core")
-os.makedirs(SAVE_DIR, exist_ok=True)
-LOG_FILE_PATH = os.path.join(SAVE_DIR, "gaze_log.txt")
-
-# ─────────────────────────────────────────────
-#  ONE EURO FILTER
+#  ONE EURO FILTER (시선 떨림 방지)
 # ─────────────────────────────────────────────
 class OneEuroFilter:
     def __init__(self, freq=30.0, min_cutoff=0.8, beta=0.06, d_cutoff=1.0):
@@ -78,7 +78,7 @@ class OneEuroFilter:
 
 
 # ─────────────────────────────────────────────
-#  5-POINT CALIBRATION
+#  5-POINT CALIBRATION (기준점 매핑 기능 완전 복원)
 # ─────────────────────────────────────────────
 MARGIN = 0.08
 
@@ -98,7 +98,7 @@ CALIB_LABELS = [
     "BOTTOM-RIGHT",
 ]
 
-CALIB_SAMPLES = 20   # 포인트당 누적 프레임 수
+CALIB_SAMPLES = 20   # 포인트당 누적할 카메라 프레임 수
 
 
 class Calibration:
@@ -110,7 +110,7 @@ class Calibration:
         self.iris_pts       = []
         self.sample_buf     = []
         self.M              = None
-        self.ready          = False
+        self.ready          = False  # 초기 구동 시 완료 상태가 아님 (창 오픈 필항)
         self.neutral_nose_x = None
         self.neutral_nose_y = None
 
@@ -143,10 +143,11 @@ class Calibration:
         return True
 
     def _fit(self):
+        # 5가지 타겟 홍채 입력점들과 실제 정규화 모니터 비율 목적지 간의 아핀 변환 최소자승법 연산
         src = np.array([[ix, iy, 1.0] for ix, iy in self.iris_pts], dtype=np.float64)
         dst = np.array(list(CALIB_TARGETS),                         dtype=np.float64)
         M_T, _, _, _ = np.linalg.lstsq(src, dst, rcond=None)
-        self.M     = M_T.T   # shape (2, 3)
+        self.M     = M_T.T   # 변환 행렬 형태 결정 (shape: 2x3)
         self.ready = True
 
     def map(self, ix, iy):
@@ -158,7 +159,7 @@ class Calibration:
 
 
 # ─────────────────────────────────────────────
-#  HEAD POSE COMPENSATION
+#  HEAD POSE COMPENSATION (머리 움직임 보정)
 # ─────────────────────────────────────────────
 HEAD_COMP_SCALE = 0.55
 
@@ -173,12 +174,14 @@ def get_head_offset(lms, calib):
 # ─────────────────────────────────────────────
 #  SETTINGS
 # ─────────────────────────────────────────────
-MOVE_SPEED      = 0.012
-DEADZONE        = 0.28
-MOUTH_THRESHOLD = 0.04
-MOUTH_CD_MAX    = 20
-PRINT_INTERVAL  = 0.01
-WIN_W, WIN_H    = 960, 720
+MOUTH_THRESHOLD  = 0.04
+MOUTH_CD_MAX     = 20
+WIN_W, WIN_H     = 960, 720
+MIN_SMOOTHING    = 0.01  # 거리가 가까울 때의 최저 속도 (정밀도 유지)
+MAX_SMOOTHING    = 0.15  # 거리가 멀 때의 최고 속도 (빠른 이동 보장)
+MIN_DISTANCE     = 150.0
+MAX_DISTANCE   = 400.0 # 마우스가 최고 속도에 도달하기 위한 타겟과의 픽셀 거리 (이보다 멀면 최고속도)
+
 
 
 # ─────────────────────────────────────────────
@@ -229,177 +232,159 @@ def draw_calib_screen(frame, calib, sampling_active, w, h):
 
 
 # ─────────────────────────────────────────────
-#  MAIN
+#  MAIN HYBRID LOOP
 # ─────────────────────────────────────────────
-calib           = Calibration()
+calib            = Calibration()
 filter_x         = OneEuroFilter()
 filter_y         = OneEuroFilter()
 
-dot_x, dot_y    = 0.5, 0.5
-is_locked       = False
-mouth_cooldown  = 0
-warning_msg     = ""
-warning_timer   = 0
-last_print_time = 0
-detection_result = None
-mouth_dist      = 0.0
-sampling_active = False
-lms             = None
+is_locked        = False
+mouth_cooldown   = 0
+sampling_active  = False
+window_destroyed = False
 
-window_name = "GazeQuest - Vision Module"
+# [추가됨] 마우스의 현재 가상 위치 (초기값은 화면 정중앙으로 설정)
+current_mouse_x = SCREEN_WIDTH / 2.0
+current_mouse_y = SCREEN_HEIGHT / 2.0
+
+window_name = "GazeQuest - Calibration Mode"
 cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-cv2.resizeWindow(window_name, WIN_W, WIN_H)
+cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
+print("==================================================")
+print(f" 모니터 해상도 감지: {SCREEN_WIDTH} x {SCREEN_HEIGHT}")
+print(f" 최소 감도: {MIN_SMOOTHING} ~ 최대 감도: {MAX_SMOOTHING} (동적 제어)")
+print(" GazeQuest 제어 시스템 모듈 구동을 시작합니다.")
+print(" [1단계] GUI 화면 안내에 따라 5가지 포인트의 초점을 학습시켜 주세요.")
+print("==================================================")
 
 cap = cv2.VideoCapture(0)
 
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        break
+try:
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-    frame = cv2.flip(frame, 1)
-    h_cam, w_cam = frame.shape[:2]
-    now = time.time()
+        now = time.time()
+        frame = cv2.flip(frame, 1)
+        h_cam, w_cam = frame.shape[:2]
 
-    rgb_frame        = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    mp_image         = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-    detection_result = detector.detect(mp_image)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_image  = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+        detection_result = detector.detect(mp_image)
 
-    iris_norm_x, iris_norm_y   = 0.0, 0.0
-    current_iris_x, current_iris_y = 0, 0
-    face_ok = bool(detection_result.face_landmarks)
+        face_ok = bool(detection_result.face_landmarks)
 
-    if face_ok:
-        lms = detection_result.face_landmarks[0]
+        if face_ok:
+            lms = detection_result.face_landmarks[0]
+            li, ri = lms[468], lms[473]
+            iris_norm_x = (li.x + ri.x) / 2.0
+            iris_norm_y = (li.y + ri.y) / 2.0
 
-        li, ri      = lms[468], lms[473]
-        iris_norm_x = (li.x + ri.x) / 2.0
-        iris_norm_y = (li.y + ri.y) / 2.0
-        current_iris_x = int(iris_norm_x * w_cam)
-        current_iris_y = int(iris_norm_y * h_cam)
+            # ─── [1단계] 캘리브레이션 모드 진행 상태 ───
+            if not calib.done:
+                if sampling_active:
+                    calib.add_sample(iris_norm_x, iris_norm_y)
+                    if len(calib.sample_buf) >= CALIB_SAMPLES:
+                        calib.confirm_point(lms=lms)
+                        sampling_active = False
+                        
+                        if calib.done:
+                            print("\n==================================================")
+                            print(" 캘리브레이션 매핑 행렬 피팅 완료!")
+                            print(" 안내 창을 종료하고 백그라운드 절대 마우스 제어 모드로 자동 진입합니다.")
+                            print(" 종료를 원하시면 터미널 창에서 Ctrl + C를 입력하세요.")
+                            print("==================================================")
 
-        cv2.circle(frame, (int(li.x*w_cam), int(li.y*h_cam)), 3, (0, 255, 100), -1)
-        cv2.circle(frame, (int(ri.x*w_cam), int(ri.y*h_cam)), 3, (0, 255, 100), -1)
-        cv2.circle(frame, (current_iris_x, current_iris_y), 4, (0, 200, 255), -1)
+                # 시각 피드백 그리기 (캘리브레이션 단계에서만 렌더링)
+                current_iris_x = int(iris_norm_x * w_cam)
+                current_iris_y = int(iris_norm_y * h_cam)
+                cv2.circle(frame, (int(li.x*w_cam), int(li.y*h_cam)), 3, (0, 255, 100), -1)
+                cv2.circle(frame, (int(ri.x*w_cam), int(ri.y*h_cam)), 3, (0, 255, 100), -1)
+                cv2.circle(frame, (current_iris_x, current_iris_y), 4, (0, 200, 255), -1)
+                draw_calib_screen(frame, calib, sampling_active, w_cam, h_cam)
 
-        if calib.done:
-            mouth_dist = abs(lms[13].y - lms[14].y)
-            if mouth_dist > MOUTH_THRESHOLD and mouth_cooldown == 0:
-                is_locked      = not is_locked
-                mouth_cooldown = MOUTH_CD_MAX
-                warning_msg    = "CURSOR LOCKED" if is_locked else "CURSOR UNLOCKED"
-                warning_timer  = 60
-            if mouth_cooldown > 0:
-                mouth_cooldown -= 1
-
-    if not calib.done:
-        if sampling_active and face_ok:
-            calib.add_sample(iris_norm_x, iris_norm_y)
-            if len(calib.sample_buf) >= CALIB_SAMPLES:
-                calib.confirm_point(lms=lms)
-                sampling_active = False
-                if calib.done:
-                    warning_msg   = "Calibration Complete!  Press R to redo"
-                    warning_timer = 90
-
-        draw_calib_screen(frame, calib, sampling_active, w_cam, h_cam)
-
-        if not face_ok:
-            cv2.putText(frame, "[ Face not detected ]", (10, 70),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-
-    else:
-        if face_ok and iris_norm_x != 0.0:
-            off_x, off_y = get_head_offset(lms, calib)
-            comp_x = iris_norm_x - off_x
-            comp_y = iris_norm_y - off_y
-
-            mapped_x, mapped_y = calib.map(comp_x, comp_y)
-
-            sx = filter_x.filter(mapped_x, timestamp=now)
-            sy = filter_y.filter(mapped_y, timestamp=now)
-
-            # 1. 중심(0.5, 0.5)으로부터의 거리와 방향 계산
-            dx = sx - 0.5
-            dy = sy - 0.5
-            dist = np.sqrt(dx**2 + dy**2)
-
-            # 2. 원형 경계(DEADZONE)를 기준으로 한 속도 계산
-            if dist > DEADZONE:
-                # (현재거리 - 반지름)을 통해 경계 밖으로 벗어난 정도를 구함
-                # 이 값이 커질수록 이동 속도가 증가함
-                speed_factor = dist - DEADZONE
-                
-                # 방향 벡터(정규화)에 거리 기반 속도 계수를 곱함
-                vx = (dx / dist) * speed_factor
-                vy = (dy / dist) * speed_factor
+            # ─── [2단계] 캘리브레이션 완료 후 실시간 절대 마우스 커서 추적 제어 ───
             else:
-                # 원 안에 있을 때는 속도 0
-                vx, vy = 0.0, 0.0
+                # 캘리브레이션 완료 즉시 안내용 웹캠 GUI 창 소멸 및 백그라운드 스위칭
+                if not window_destroyed:
+                    cv2.destroyAllWindows()
+                    window_destroyed = True
+                
+                # CPU 과도한 루프 레이스 방지를 위한 미세 자원 할당 양보
+                time.sleep(0.001)
 
-            if not is_locked:
-                dot_x = float(np.clip(dot_x + vx * MOVE_SPEED, 0.0, 1.0))
-                dot_y = float(np.clip(dot_y + vy * MOVE_SPEED, 0.0, 1.0))
+                # 입 크기 기반 토글 락 제어 (LOCK / UNLOCK)
+                mouth_dist = abs(lms[13].y - lms[14].y)
+                if mouth_dist > MOUTH_THRESHOLD and mouth_cooldown == 0:
+                    is_locked = not is_locked
+                    mouth_cooldown = MOUTH_CD_MAX
+                    status_str = "LOCKED (마우스 고정)" if is_locked else "UNLOCKED (추적 활성화)"
+                    print(f"[시스템 알림] 커서 상태 변경: {status_str}")
+                    
+                if mouth_cooldown > 0:
+                    mouth_cooldown -= 1
 
-            # ─── 수정된 부분: 데드존 시각화를 사각형에서 원으로 변경 ───
-            center_x, center_y = int(w_cam * 0.5), int(h_cam * 0.5)
-            radius = int(DEADZONE * w_cam)
-            cv2.circle(frame, (center_x, center_y), radius, (200, 200, 200), 1)
-            # ──────────────────────────────────────────────────────────
+                # 락 상태가 아닐 때만 실제 하드웨어 커서 움직임 명령 전송
+                if not is_locked:
+                    # 머리 흔들림 오프셋 상쇄 연산
+                    off_x, off_y = get_head_offset(lms, calib)
+                    comp_x = iris_norm_x - off_x
+                    comp_y = iris_norm_y - off_y
 
-            cv2.circle(frame, (int(sx*w_cam), int(sy*h_cam)), 6, (0, 220, 255), -1)
-            dot_color = (0, 165, 255) if is_locked else (0, 0, 255)
-            cv2.circle(frame, (int(dot_x*w_cam), int(dot_y*h_cam)), 15, dot_color, -1)
+                    # 상하좌우 관계가 온전한 모니터 절대 비율 공간(0.0 ~ 1.0)으로 아핀 투영
+                    mapped_x, mapped_y = calib.map(comp_x, comp_y)
 
-            state_text   = "LOCKED  (open mouth)" if is_locked else f"MOVING  ({vx}, {vy})"
-            status_color = (0, 60, 255) if is_locked else (0, 220, 60)
-            cv2.putText(frame, f"STATUS: {state_text}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_color, 2)
+                    # 부드러운 움직임을 보장하기 위한 원유로 실시간 필터 적용
+                    sx = filter_x.filter(mapped_x, timestamp=now)
+                    sy = filter_y.filter(mapped_y, timestamp=now)
 
-            if now - last_print_time >= PRINT_INTERVAL:
-                status = 'LOCKED' if is_locked else 'ACTIVE'
-                # 'a' 모드를 사용하여 기존 데이터 뒤에 이어서 작성합니다.
-                with open(LOG_FILE_PATH, "a", encoding="utf-8") as f:
-                    # 형식: 타임스탬프, 상태, X좌표, Y좌표, 입벌림수치
-                    log_entry = (f"{time.strftime('%H:%M:%S', time.localtime(now))}, "
-                                f"{status}, {dot_x:.4f}, {dot_y:.4f}, {mouth_dist:.4f}\n")
-                    f.write(log_entry)
-                last_print_time = now
+                    # 시선이 모니터 화면 바깥 경계를 초과할 경우를 위한 경계 제한 조치
+                    sx = np.clip(sx, 0.0, 1.0)
+                    sy = np.clip(sy, 0.0, 1.0)
 
-    if warning_timer > 0:
-        msg_col = (0, 60, 255) if is_locked else (0, 220, 60)
-        cv2.putText(frame, warning_msg, (w_cam//2 - 140, 75),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.85, msg_col, 2)
-        warning_timer -= 1
+                    # 요구사항 반영: 정규화 좌표계를 스크린 픽셀 크기에 그대로 연동시켜 절대 좌표(최종 목표 지점)로 변환
+                    target_x = sx * SCREEN_WIDTH
+                    target_y = sy * SCREEN_HEIGHT
 
-    rect = cv2.getWindowImageRect(window_name)
-    if rect and rect[2] > 0 and rect[3] > 0:
-        cv2.imshow(window_name,
-                   cv2.resize(frame, (rect[2], rect[3]),
-                               interpolation=cv2.INTER_LINEAR))
-    else:
-        cv2.imshow(window_name, frame)
+                    # 선형 보간(Lerf)
+                    dist = np.sqrt((target_x - current_mouse_x)**2 + (target_y - current_mouse_y)**2)
+                    
+                    if dist <= MIN_DISTANCE:
+                        # 타겟 반경 150픽셀 이내: 무조건 최소 속도로 정밀 타겟팅
+                        dynamic_smoothing = MIN_SMOOTHING
+                    elif dist >= MAX_DISTANCE:
+                        # 타겟 반경 400픽셀 밖: 무조건 최대 속도로 날아감
+                        dynamic_smoothing = MAX_SMOOTHING
+                    else:
+                        # 150 ~ 400픽셀 사이: 속도가 자연스럽게 가속/감속되는 구간
+                        dist_ratio = (dist - MIN_DISTANCE) / (MAX_DISTANCE - MIN_DISTANCE)
+                        dynamic_smoothing = MIN_SMOOTHING + (MAX_SMOOTHING - MIN_SMOOTHING) * dist_ratio
 
-    key = cv2.waitKey(1) & 0xFF
+                    current_mouse_x += (target_x - current_mouse_x) * dynamic_smoothing
+                    current_mouse_y += (target_y - current_mouse_y) * dynamic_smoothing
 
-    if key == 27 or cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
-        break
+                    # OS 커서 제어 하드웨어 가로채기 주입 (_pause=False 처리로 실시간 지연 요소 소멸)
+                    pyautogui.moveTo(int(current_mouse_x), int(current_mouse_y), _pause=False)
 
-    elif key == ord(' '):
-        if not calib.done and face_ok and not sampling_active:
-            sampling_active = True
+        # 캘리브레이션이 완료되지 않은 상태(1단계)에서만 오픈CV 창 활성화 및 키 매핑 스캔
+        if not calib.done:
+            cv2.imshow(window_name, frame)
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27:  # ESC 키 누르면 도중 탈출
+                break
+            elif key == ord(' '):  # 스페이스바 누르면 현재 타겟에 대한 데이터 누적 채집 시작
+                if face_ok and not sampling_active:
+                    sampling_active = True
+        else:
+            # 2단계 진입 후에는 포커스 창이 없으므로 무거운 cv2.waitKey를 건너뜀
+            pass
 
-    elif key == ord('r') or key == ord('R'):
-        calib           = Calibration()
-        filter_x         = OneEuroFilter()
-        filter_y         = OneEuroFilter()
-        dot_x, dot_y    = 0.5, 0.5
-        is_locked       = False
-        sampling_active = False
-        warning_msg     = "RESET!"
-        warning_timer   = 60
-        print("[GazeQuest] Reset.")
+except KeyboardInterrupt:
+    print("\n[시스템 알림] 터미널 인터럽트 요청 감지. 시선 마우스 제어 모듈을 완전히 종료합니다.")
 
-cap.release()
-cv2.destroyAllWindows()
-
+finally:
+    cap.release()
+    if not window_destroyed:
+        cv2.destroyAllWindows()
