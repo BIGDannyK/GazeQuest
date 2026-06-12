@@ -1,3 +1,4 @@
+import sys
 import cv2
 import numpy as np
 import urllib.request
@@ -5,14 +6,31 @@ import os
 import mediapipe as mp
 import time
 import pyautogui
+import signal
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
+from PyQt5.QtWidgets import QApplication, QWidget
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtGui import QPainter, QPen, QColor
 
 # ─────────────────────────────────────────────
-#  PYAUTOGUI SETUP (마우스 제어 설정)
+#  PYAUTOGUI & SETTINGS (마우스 및 설정)
 # ─────────────────────────────────────────────
-pyautogui.FAILSAFE = False  # 화면 모서리 강제 종료 방지
+pyautogui.FAILSAFE = False
 SCREEN_WIDTH, SCREEN_HEIGHT = pyautogui.size()
+
+MOUTH_THRESHOLD  = 0.04
+MOUTH_CD_MAX     = 20
+MIN_SMOOTHING    = 0.01
+MAX_SMOOTHING    = 0.15
+MIN_DISTANCE     = 150.0
+MAX_DISTANCE     = 400.0
+
+# [체류 클릭 설정]
+DWELL_RADIUS        = 30.0   # 머물러야 하는 픽셀 반경
+DWELL_TIME_SEC      = 1.2    # 클릭까지 필요한 시간 (초)
+CLICK_CD_MAX        = 15     # 쿨다운
+DWELL_VISUAL_RADIUS = 25     # 그려질 원의 크기
 
 # ─────────────────────────────────────────────
 #  MODEL SETUP
@@ -34,17 +52,13 @@ options = vision.FaceLandmarkerOptions(
 detector = vision.FaceLandmarker.create_from_options(options)
 
 # ─────────────────────────────────────────────
-#  ONE EURO FILTER (시선 떨림 방지)
+#  ONE EURO FILTER & CALIBRATION (기존과 동일)
 # ─────────────────────────────────────────────
 class OneEuroFilter:
     def __init__(self, freq=30.0, min_cutoff=0.8, beta=0.06, d_cutoff=1.0):
-        self.freq       = freq
-        self.min_cutoff = min_cutoff
-        self.beta       = beta
-        self.d_cutoff   = d_cutoff
-        self.x_prev     = None
-        self.dx_prev     = 0.0
-        self.t_prev     = None
+        self.freq, self.min_cutoff, self.beta, self.d_cutoff = freq, min_cutoff, beta, d_cutoff
+        self.x_prev, self.t_prev = None, None
+        self.dx_prev = 0.0
 
     def _alpha(self, cutoff):
         tau = 1.0 / (2 * np.pi * cutoff)
@@ -53,13 +67,11 @@ class OneEuroFilter:
 
     def filter(self, x, timestamp=None):
         if self.x_prev is None:
-            self.x_prev = x
-            self.t_prev = timestamp
+            self.x_prev, self.t_prev = x, timestamp
             return x
         if timestamp is not None and self.t_prev is not None:
             dt = timestamp - self.t_prev
-            if dt > 0:
-                self.freq = 1.0 / dt
+            if dt > 0: self.freq = 1.0 / dt
             self.t_prev = timestamp
         dx      = (x - self.x_prev) * self.freq
         a_d     = self._alpha(self.d_cutoff)
@@ -67,324 +79,282 @@ class OneEuroFilter:
         cutoff  = self.min_cutoff + self.beta * abs(dx_hat)
         a       = self._alpha(cutoff)
         x_hat   = a * x + (1 - a) * self.x_prev
-        self.x_prev  = x_hat
-        self.dx_prev = dx_hat
+        self.x_prev, self.dx_prev = x_hat, dx_hat
         return x_hat
 
-    def reset(self):
-        self.x_prev  = None
-        self.dx_prev = 0.0
-        self.t_prev  = None
-
-
-# ─────────────────────────────────────────────
-#  5-POINT CALIBRATION (기준점 매핑 기능 완전 복원)
-# ─────────────────────────────────────────────
 MARGIN = 0.08
-
-CALIB_TARGETS = [
-    (MARGIN,       MARGIN      ),   # 0 좌상단
-    (1 - MARGIN,   MARGIN      ),   # 1 우상단
-    (0.5,          0.5         ),   # 2 중앙
-    (MARGIN,       1 - MARGIN  ),   # 3 좌하단
-    (1 - MARGIN,   1 - MARGIN  ),   # 4 우하단
-]
-
-CALIB_LABELS = [
-    "TOP-LEFT",
-    "TOP-RIGHT",
-    "CENTER",
-    "BOTTOM-LEFT",
-    "BOTTOM-RIGHT",
-]
-
-CALIB_SAMPLES = 20   # 포인트당 누적할 카메라 프레임 수
-
+CALIB_TARGETS = [(MARGIN, MARGIN), (1 - MARGIN, MARGIN), (0.5, 0.5), (MARGIN, 1 - MARGIN), (1 - MARGIN, 1 - MARGIN)]
+CALIB_LABELS = ["TOP-LEFT", "TOP-RIGHT", "CENTER", "BOTTOM-LEFT", "BOTTOM-RIGHT"]
+CALIB_SAMPLES = 20
 
 class Calibration:
-    def __init__(self):
-        self.reset()
-
+    def __init__(self): self.reset()
     def reset(self):
-        self.step           = 0
-        self.iris_pts       = []
-        self.sample_buf     = []
-        self.M              = None
-        self.ready          = False  # 초기 구동 시 완료 상태가 아님 (창 오픈 필항)
-        self.neutral_nose_x = None
-        self.neutral_nose_y = None
-
+        self.step = 0; self.iris_pts = []; self.sample_buf = []; self.M = None; self.ready = False
+        self.neutral_nose_x = None; self.neutral_nose_y = None
     @property
-    def done(self):
-        return self.ready
-
+    def done(self): return self.ready
     def current_target_px(self, frame_w, frame_h):
-        if self.step >= len(CALIB_TARGETS):
-            return None
-        tx, ty = CALIB_TARGETS[self.step]
-        return int(tx * frame_w), int(ty * frame_h)
-
-    def add_sample(self, ix, iy):
-        self.sample_buf.append((ix, iy))
-
+        if self.step >= len(CALIB_TARGETS): return None
+        return int(CALIB_TARGETS[self.step][0] * frame_w), int(CALIB_TARGETS[self.step][1] * frame_h)
+    def add_sample(self, ix, iy): self.sample_buf.append((ix, iy))
     def confirm_point(self, lms=None):
-        if not self.sample_buf:
-            return False
-        avg_x = float(np.mean([s[0] for s in self.sample_buf]))
-        avg_y = float(np.mean([s[1] for s in self.sample_buf]))
-        self.iris_pts.append((avg_x, avg_y))
+        if not self.sample_buf: return False
+        self.iris_pts.append((float(np.mean([s[0] for s in self.sample_buf])), float(np.mean([s[1] for s in self.sample_buf]))))
         if self.step == 0 and lms is not None:
-            self.neutral_nose_x = lms[1].x - lms[6].x
-            self.neutral_nose_y = lms[1].y - lms[6].y
+            self.neutral_nose_x, self.neutral_nose_y = lms[1].x - lms[6].x, lms[1].y - lms[6].y
         self.sample_buf = []
         self.step += 1
-        if self.step >= len(CALIB_TARGETS):
-            self._fit()
+        if self.step >= len(CALIB_TARGETS): self._fit()
         return True
-
     def _fit(self):
-        # 5가지 타겟 홍채 입력점들과 실제 정규화 모니터 비율 목적지 간의 아핀 변환 최소자승법 연산
         src = np.array([[ix, iy, 1.0] for ix, iy in self.iris_pts], dtype=np.float64)
-        dst = np.array(list(CALIB_TARGETS),                         dtype=np.float64)
+        dst = np.array(list(CALIB_TARGETS), dtype=np.float64)
         M_T, _, _, _ = np.linalg.lstsq(src, dst, rcond=None)
-        self.M     = M_T.T   # 변환 행렬 형태 결정 (shape: 2x3)
-        self.ready = True
-
+        self.M, self.ready = M_T.T, True
     def map(self, ix, iy):
-        if self.M is None:
-            return ix, iy
-        v = np.array([ix, iy, 1.0])
-        r = self.M @ v
+        if self.M is None: return ix, iy
+        r = self.M @ np.array([ix, iy, 1.0])
         return float(r[0]), float(r[1])
 
-
-# ─────────────────────────────────────────────
-#  HEAD POSE COMPENSATION (머리 움직임 보정)
-# ─────────────────────────────────────────────
-HEAD_COMP_SCALE = 0.55
-
 def get_head_offset(lms, calib):
-    if calib.neutral_nose_x is None:
-        return 0.0, 0.0
-    nx = (lms[1].x - lms[6].x) - calib.neutral_nose_x
-    ny = (lms[1].y - lms[6].y) - calib.neutral_nose_y
-    return nx * HEAD_COMP_SCALE, ny * HEAD_COMP_SCALE
+    if calib.neutral_nose_x is None: return 0.0, 0.0
+    return (lms[1].x - lms[6].x - calib.neutral_nose_x) * 0.55, (lms[1].y - lms[6].y - calib.neutral_nose_y) * 0.55
 
-
-# ─────────────────────────────────────────────
-#  SETTINGS
-# ─────────────────────────────────────────────
-MOUTH_THRESHOLD  = 0.04
-MOUTH_CD_MAX     = 20
-WIN_W, WIN_H     = 960, 720
-MIN_SMOOTHING    = 0.01  # 거리가 가까울 때의 최저 속도 (정밀도 유지)
-MAX_SMOOTHING    = 0.15  # 거리가 멀 때의 최고 속도 (빠른 이동 보장)
-MIN_DISTANCE     = 150.0
-MAX_DISTANCE   = 400.0 # 마우스가 최고 속도에 도달하기 위한 타겟과의 픽셀 거리 (이보다 멀면 최고속도)
-
-
-
-# ─────────────────────────────────────────────
-#  CALIBRATION DRAWING HELPER
-# ─────────────────────────────────────────────
 def draw_calib_screen(frame, calib, sampling_active, w, h):
     tgt = calib.current_target_px(w, h)
-    if tgt is None:
-        return
-    tx, ty    = tgt
-    label     = CALIB_LABELS[calib.step]
-    progress  = len(calib.sample_buf) / CALIB_SAMPLES if sampling_active else 0.0
-
-    if sampling_active:
-        guide = f"Step {calib.step+1}/5: Sampling {label} ...  (hold still)"
-        g_col = (0, 220, 100)
-    else:
-        guide = f"Step {calib.step+1}/5: Look at {label}  ->  press SPACE"
-        g_col = (0, 200, 255)
+    if not tgt: return
+    tx, ty = tgt
+    label = CALIB_LABELS[calib.step]
+    progress = len(calib.sample_buf) / CALIB_SAMPLES if sampling_active else 0.0
+    guide, g_col = (f"Step {calib.step+1}/5: Sampling {label} ...", (0, 220, 100)) if sampling_active else (f"Step {calib.step+1}/5: Look at {label}  ->  press SPACE", (0, 200, 255))
     cv2.putText(frame, guide, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.62, g_col, 2)
-
     cv2.circle(frame, (tx, ty), 24, (255, 255, 255), 2)
-    if int(time.time() * 3) % 2 == 0:
-        cv2.circle(frame, (tx, ty), 7, (0, 60, 255), -1)
-    else:
-        cv2.circle(frame, (tx, ty), 7, (0, 120, 255), -1)
-    if progress > 0:
-        cv2.ellipse(frame, (tx, ty), (24, 24), -90,
-                    0, int(360 * progress), (0, 220, 100), 3)
-    cv2.putText(frame, label, (tx - 40, ty + 40),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
-
-    for i in range(calib.step):
-        dtx = int(CALIB_TARGETS[i][0] * w)
-        dty = int(CALIB_TARGETS[i][1] * h)
-        cv2.circle(frame, (dtx, dty), 10, (0, 200, 80), -1)
-        cv2.putText(frame, "v", (dtx - 5, dty + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-
-    bx, by, bw, bh = 10, h - 28, w - 20, 12
-    cv2.rectangle(frame, (bx, by), (bx+bw, by+bh), (45, 45, 45), -1)
-    if progress > 0:
-        cv2.rectangle(frame, (bx, by), (bx + int(bw*progress), by+bh),
-                      (0, 190, 70), -1)
-    cv2.rectangle(frame, (bx, by), (bx+bw, by+bh), (130, 130, 130), 1)
-    cv2.putText(frame, f"{int(progress*100)}%", (bx+4, by-3),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (160, 160, 160), 1)
-
+    cv2.circle(frame, (tx, ty), 7, (0, 60, 255) if int(time.time() * 3) % 2 == 0 else (0, 120, 255), -1)
+    if progress > 0: cv2.ellipse(frame, (tx, ty), (24, 24), -90, 0, int(360 * progress), (0, 220, 100), 3)
+    cv2.putText(frame, label, (tx - 40, ty + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
 
 # ─────────────────────────────────────────────
-#  MAIN HYBRID LOOP
+#  [NEW] 백그라운드 스레드 (웹캠 및 마우스 제어 담당)
 # ─────────────────────────────────────────────
-calib            = Calibration()
-filter_x         = OneEuroFilter()
-filter_y         = OneEuroFilter()
+class GazeThread(QThread):
+    # GUI로 마우스 좌표와 진행률(0.0 ~ 1.0)을 보내기 위한 신호
+    update_overlay_signal = pyqtSignal(int, int, float)
 
-is_locked        = False
-mouth_cooldown   = 0
-sampling_active  = False
-window_destroyed = False
+    def __init__(self, cap, calib):
+        super().__init__()
+        self.cap = cap
+        self.calib = calib
+        self.running = True
 
-# [추가됨] 마우스의 현재 가상 위치 (초기값은 화면 정중앙으로 설정)
-current_mouse_x = SCREEN_WIDTH / 2.0
-current_mouse_y = SCREEN_HEIGHT / 2.0
+    def run(self):
+        filter_x, filter_y = OneEuroFilter(), OneEuroFilter()
+        current_mouse_x, current_mouse_y = SCREEN_WIDTH / 2.0, SCREEN_HEIGHT / 2.0
+        is_locked, mouth_cooldown = False, 0
+        
+        dwell_start_time = 0.0
+        last_dwell_x, last_dwell_y = current_mouse_x, current_mouse_y
+        click_cooldown = 0
 
-window_name = "GazeQuest - Calibration Mode"
-cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        while self.running and self.cap.isOpened():
+            ret, frame = self.cap.read()
+            if not ret: break
 
-print("==================================================")
-print(f" 모니터 해상도 감지: {SCREEN_WIDTH} x {SCREEN_HEIGHT}")
-print(f" 최소 감도: {MIN_SMOOTHING} ~ 최대 감도: {MAX_SMOOTHING} (동적 제어)")
-print(" GazeQuest 제어 시스템 모듈 구동을 시작합니다.")
-print(" [1단계] GUI 화면 안내에 따라 5가지 포인트의 초점을 학습시켜 주세요.")
-print("==================================================")
+            now = time.time()
+            frame = cv2.flip(frame, 1)
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+            detection_result = detector.detect(mp_image)
 
-cap = cv2.VideoCapture(0)
+            if detection_result.face_landmarks:
+                lms = detection_result.face_landmarks[0]
+                li, ri = lms[468], lms[473]
+                iris_norm_x, iris_norm_y = (li.x + ri.x) / 2.0, (li.y + ri.y) / 2.0
 
-try:
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        now = time.time()
-        frame = cv2.flip(frame, 1)
-        h_cam, w_cam = frame.shape[:2]
-
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_image  = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-        detection_result = detector.detect(mp_image)
-
-        face_ok = bool(detection_result.face_landmarks)
-
-        if face_ok:
-            lms = detection_result.face_landmarks[0]
-            li, ri = lms[468], lms[473]
-            iris_norm_x = (li.x + ri.x) / 2.0
-            iris_norm_y = (li.y + ri.y) / 2.0
-
-            # ─── [1단계] 캘리브레이션 모드 진행 상태 ───
-            if not calib.done:
-                if sampling_active:
-                    calib.add_sample(iris_norm_x, iris_norm_y)
-                    if len(calib.sample_buf) >= CALIB_SAMPLES:
-                        calib.confirm_point(lms=lms)
-                        sampling_active = False
-                        
-                        if calib.done:
-                            print("\n==================================================")
-                            print(" 캘리브레이션 매핑 행렬 피팅 완료!")
-                            print(" 안내 창을 종료하고 백그라운드 절대 마우스 제어 모드로 자동 진입합니다.")
-                            print(" 종료를 원하시면 터미널 창에서 Ctrl + C를 입력하세요.")
-                            print("==================================================")
-
-                # 시각 피드백 그리기 (캘리브레이션 단계에서만 렌더링)
-                current_iris_x = int(iris_norm_x * w_cam)
-                current_iris_y = int(iris_norm_y * h_cam)
-                cv2.circle(frame, (int(li.x*w_cam), int(li.y*h_cam)), 3, (0, 255, 100), -1)
-                cv2.circle(frame, (int(ri.x*w_cam), int(ri.y*h_cam)), 3, (0, 255, 100), -1)
-                cv2.circle(frame, (current_iris_x, current_iris_y), 4, (0, 200, 255), -1)
-                draw_calib_screen(frame, calib, sampling_active, w_cam, h_cam)
-
-            # ─── [2단계] 캘리브레이션 완료 후 실시간 절대 마우스 커서 추적 제어 ───
-            else:
-                # 캘리브레이션 완료 즉시 안내용 웹캠 GUI 창 소멸 및 백그라운드 스위칭
-                if not window_destroyed:
-                    cv2.destroyAllWindows()
-                    window_destroyed = True
-                
-                # CPU 과도한 루프 레이스 방지를 위한 미세 자원 할당 양보
-                time.sleep(0.001)
-
-                # 입 크기 기반 토글 락 제어 (LOCK / UNLOCK)
                 mouth_dist = abs(lms[13].y - lms[14].y)
                 if mouth_dist > MOUTH_THRESHOLD and mouth_cooldown == 0:
                     is_locked = not is_locked
                     mouth_cooldown = MOUTH_CD_MAX
-                    status_str = "LOCKED (마우스 고정)" if is_locked else "UNLOCKED (추적 활성화)"
-                    print(f"[시스템 알림] 커서 상태 변경: {status_str}")
-                    
-                if mouth_cooldown > 0:
-                    mouth_cooldown -= 1
+                    print("LOCKED" if is_locked else "UNLOCKED")
+                if mouth_cooldown > 0: mouth_cooldown -= 1
 
-                # 락 상태가 아닐 때만 실제 하드웨어 커서 움직임 명령 전송
                 if not is_locked:
-                    # 머리 흔들림 오프셋 상쇄 연산
-                    off_x, off_y = get_head_offset(lms, calib)
-                    comp_x = iris_norm_x - off_x
-                    comp_y = iris_norm_y - off_y
+                    off_x, off_y = get_head_offset(lms, self.calib)
+                    mapped_x, mapped_y = self.calib.map(iris_norm_x - off_x, iris_norm_y - off_y)
+                    sx = np.clip(filter_x.filter(mapped_x, timestamp=now), 0.0, 1.0)
+                    sy = np.clip(filter_y.filter(mapped_y, timestamp=now), 0.0, 1.0)
 
-                    # 상하좌우 관계가 온전한 모니터 절대 비율 공간(0.0 ~ 1.0)으로 아핀 투영
-                    mapped_x, mapped_y = calib.map(comp_x, comp_y)
-
-                    # 부드러운 움직임을 보장하기 위한 원유로 실시간 필터 적용
-                    sx = filter_x.filter(mapped_x, timestamp=now)
-                    sy = filter_y.filter(mapped_y, timestamp=now)
-
-                    # 시선이 모니터 화면 바깥 경계를 초과할 경우를 위한 경계 제한 조치
-                    sx = np.clip(sx, 0.0, 1.0)
-                    sy = np.clip(sy, 0.0, 1.0)
-
-                    # 요구사항 반영: 정규화 좌표계를 스크린 픽셀 크기에 그대로 연동시켜 절대 좌표(최종 목표 지점)로 변환
-                    target_x = sx * SCREEN_WIDTH
-                    target_y = sy * SCREEN_HEIGHT
-
-                    # 선형 보간(Lerf)
+                    target_x, target_y = sx * SCREEN_WIDTH, sy * SCREEN_HEIGHT
                     dist = np.sqrt((target_x - current_mouse_x)**2 + (target_y - current_mouse_y)**2)
                     
-                    if dist <= MIN_DISTANCE:
-                        # 타겟 반경 150픽셀 이내: 무조건 최소 속도로 정밀 타겟팅
-                        dynamic_smoothing = MIN_SMOOTHING
-                    elif dist >= MAX_DISTANCE:
-                        # 타겟 반경 400픽셀 밖: 무조건 최대 속도로 날아감
-                        dynamic_smoothing = MAX_SMOOTHING
-                    else:
-                        # 150 ~ 400픽셀 사이: 속도가 자연스럽게 가속/감속되는 구간
-                        dist_ratio = (dist - MIN_DISTANCE) / (MAX_DISTANCE - MIN_DISTANCE)
-                        dynamic_smoothing = MIN_SMOOTHING + (MAX_SMOOTHING - MIN_SMOOTHING) * dist_ratio
+                    if dist <= MIN_DISTANCE: dyn_smooth = MIN_SMOOTHING
+                    elif dist >= MAX_DISTANCE: dyn_smooth = MAX_SMOOTHING
+                    else: dyn_smooth = MIN_SMOOTHING + (MAX_SMOOTHING - MIN_SMOOTHING) * ((dist - MIN_DISTANCE) / (MAX_DISTANCE - MIN_DISTANCE))
 
-                    current_mouse_x += (target_x - current_mouse_x) * dynamic_smoothing
-                    current_mouse_y += (target_y - current_mouse_y) * dynamic_smoothing
-
-                    # OS 커서 제어 하드웨어 가로채기 주입 (_pause=False 처리로 실시간 지연 요소 소멸)
+                    current_mouse_x += (target_x - current_mouse_x) * dyn_smooth
+                    current_mouse_y += (target_y - current_mouse_y) * dyn_smooth
                     pyautogui.moveTo(int(current_mouse_x), int(current_mouse_y), _pause=False)
 
-        # 캘리브레이션이 완료되지 않은 상태(1단계)에서만 오픈CV 창 활성화 및 키 매핑 스캔
-        if not calib.done:
-            cv2.imshow(window_name, frame)
-            key = cv2.waitKey(1) & 0xFF
-            if key == 27:  # ESC 키 누르면 도중 탈출
-                break
-            elif key == ord(' '):  # 스페이스바 누르면 현재 타겟에 대한 데이터 누적 채집 시작
-                if face_ok and not sampling_active:
-                    sampling_active = True
-        else:
-            # 2단계 진입 후에는 포커스 창이 없으므로 무거운 cv2.waitKey를 건너뜀
-            pass
+                    # Dwell-Click 로직
+                    if click_cooldown > 0: click_cooldown -= 1
+                    dist_from_last = np.sqrt((current_mouse_x - last_dwell_x)**2 + (current_mouse_y - last_dwell_y)**2)
+                    
+                    progress_ratio = 0.0
+                    if dist_from_last <= DWELL_RADIUS:
+                        if dwell_start_time == 0.0: dwell_start_time = now
+                        progress_ratio = min((now - dwell_start_time) / DWELL_TIME_SEC, 1.0)
 
-except KeyboardInterrupt:
-    print("\n[시스템 알림] 터미널 인터럽트 요청 감지. 시선 마우스 제어 모듈을 완전히 종료합니다.")
+                        if progress_ratio >= 1.0 and click_cooldown == 0:
+                            pyautogui.leftClick(_pause=False)
+                            click_cooldown = CLICK_CD_MAX
+                            dwell_start_time = 0.0
+                    else:
+                        last_dwell_x, last_dwell_y = current_mouse_x, current_mouse_y
+                        dwell_start_time = 0.0
 
-finally:
-    cap.release()
-    if not window_destroyed:
-        cv2.destroyAllWindows()
+                    # GUI 스레드로 투명 원을 그릴 위치와 진행률 전송
+                    self.update_overlay_signal.emit(int(current_mouse_x), int(current_mouse_y), progress_ratio)
+
+            time.sleep(0.005) # 스레드 부하 방지
+
+    def stop(self):
+        self.running = False
+        self.wait()
+
+# ─────────────────────────────────────────────
+#  [NEW] 투명 오버레이 UI (PyQt5)
+# ─────────────────────────────────────────────
+class TransparentOverlay(QWidget):
+    def __init__(self):
+        super().__init__()
+        # 창 프레임 제거, 항상 위 설정, 작업표시줄 숨김
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        # 배경을 완전히 투명하게 설정
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        # ★ 핵심: 마우스 클릭 이벤트가 창을 통과하도록 설정 (Click-through)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        
+        self.setGeometry(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
+        self.cursor_x = 0
+        self.cursor_y = 0
+        self.progress = 0.0
+
+    def update_overlay(self, x, y, progress):
+        self.cursor_x = x
+        self.cursor_y = y
+        self.progress = progress
+        self.update()  # paintEvent 호출 (화면 갱신)
+
+    def paintEvent(self, event):
+        if self.progress > 0:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing) # 계단현상 방지
+
+            # 1. 반투명한 회색 배경 원 (틀)
+            pen_bg = QPen(QColor(150, 150, 150, 100), 4)
+            painter.setPen(pen_bg)
+            painter.drawEllipse(self.cursor_x - DWELL_VISUAL_RADIUS, self.cursor_y - DWELL_VISUAL_RADIUS, 
+                                DWELL_VISUAL_RADIUS * 2, DWELL_VISUAL_RADIUS * 2)
+
+            # 2. 파란색 진행 원 (시간이 지날수록 차오름)
+            pen_fg = QPen(QColor(50, 150, 255, 220), 5)
+            painter.setPen(pen_fg)
+            
+            # PyQt5에서 drawArc의 각도는 1/16도 단위. 90도는 12시 방향.
+            # 마이너스 값은 시계방향으로 그려짐.
+            start_angle = 90 * 16 
+            span_angle = int(-360 * self.progress * 16)
+            painter.drawArc(self.cursor_x - DWELL_VISUAL_RADIUS, self.cursor_y - DWELL_VISUAL_RADIUS, 
+                            DWELL_VISUAL_RADIUS * 2, DWELL_VISUAL_RADIUS * 2, 
+                            start_angle, span_angle)
+
+# ─────────────────────────────────────────────
+#  MAIN EXECUTION (1단계 OpenCV -> 2단계 PyQt5)
+# ─────────────────────────────────────────────
+if __name__ == "__main__":
+    cap = cv2.VideoCapture(0)
+    calib = Calibration()
+    sampling_active = False
+
+    print("==================================================")
+    print(" [1단계] OpenCV 기반 캘리브레이션 시작")
+    print(" 화면 안내에 따라 스페이스바를 눌러 초점을 학습하세요.")
+    print("==================================================")
+
+    window_name = "Calibration Phase"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
+    # --- 1단계: 캘리브레이션 루프 (OpenCV UI) ---
+    while cap.isOpened() and not calib.done:
+        ret, frame = cap.read()
+        if not ret: break
+
+        frame = cv2.flip(frame, 1)
+        h_cam, w_cam = frame.shape[:2]
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        res = detector.detect(mp_image)
+        face_ok = bool(res.face_landmarks)
+
+        if face_ok:
+            lms = res.face_landmarks[0]
+            if sampling_active:
+                calib.add_sample((lms[468].x + lms[473].x)/2.0, (lms[468].y + lms[473].y)/2.0)
+                if len(calib.sample_buf) >= CALIB_SAMPLES:
+                    calib.confirm_point(lms=lms)
+                    sampling_active = False
+
+            draw_calib_screen(frame, calib, sampling_active, w_cam, h_cam)
+
+        cv2.imshow(window_name, frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27: # ESC
+            cap.release()
+            cv2.destroyAllWindows()
+            sys.exit()
+        elif key == ord(' ') and face_ok and not sampling_active:
+            sampling_active = True
+
+    cv2.destroyAllWindows() # 캘리브레이션 완료 시 창 닫기
+
+    print("\n==================================================")
+    print(" [2단계] 투명 오버레이 실시간 추적 모드 진입")
+    print(" 웹캠 창이 숨겨지고 바탕화면 모드로 작동합니다.")
+    print(" 마우스를 특정 위치에 1.2초간 고정하면 파란 원이 차오르며 클릭됩니다.")
+    print(" 종료하려면 터미널에서 Ctrl+C 를 누르세요.")
+    print("==================================================")
+
+    # --- 2단계: 백그라운드 추적 및 투명 오버레이 렌더링 (PyQt5) ---
+    app = QApplication(sys.argv)
+    
+    overlay = TransparentOverlay()
+    overlay.show()
+
+    gaze_thread = GazeThread(cap, calib)
+    gaze_thread.update_overlay_signal.connect(overlay.update_overlay) # 스레드와 UI 연결
+    gaze_thread.start()
+
+    def sigint_handler(signum, frame):
+        print("\n[시스템 알림] 터미널에서 Ctrl+C 입력 감지. 프로그램을 안전하게 종료합니다.")
+        app.quit()  # PyQt 메인 이벤트 루프를 강제 탈출시킴
+
+    # 터미널 인터럽트 신호를 sigint_handler 함수로 연결
+    signal.signal(signal.SIGINT, sigint_handler)
+
+    # 파이썬 인터프리터가 C++ 루프 속에서도 0.5초마다 주기적으로 깨어나서
+    # Ctrl+C 신호가 들어왔는지 확인하도록 빈 타이머(Dummy Timer) 설정
+    timer = QTimer()
+    timer.start(500)
+    timer.timeout.connect(lambda: None)
+    
+    # PyQt5 메인 루프 실행 (app.quit()이 호출될 때까지 여기서 대기)
+    app.exec_() 
+    
+    # ─────────────────────────────────────────────
+    # 프로그램 종료 시 자원 안전 해제
+    # ─────────────────────────────────────────────
+    print("[시스템 알림] 백그라운드 스레드 및 웹캠 자원을 해제합니다...")
+    gaze_thread.stop()
+    if cap.isOpened():
+        cap.release()
+    sys.exit(0)
