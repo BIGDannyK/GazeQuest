@@ -1,84 +1,80 @@
 :root {
     --bg-color: #0f172a;
-    --card-bg: #1e293b;
+    --panel: #111827;
+    --panel2: #1f2937;
     --primary: #38bdf8;
-    --secondary: #818cf8;
-    --accent: #f43f5e;
-    --text: #f1f5f9;
+    --accent: #a7f3d0;
+    --danger: #fb7185;
+    --text: #e5e7eb;
+    --muted: #94a3b8;
 }
 
+* { box-sizing: border-box; }
 body {
     margin: 0;
-    font-family: 'Pretendard', -apple-system, sans-serif;
-    background-color: var(--bg-color);
-    color: var(--text);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
     min-height: 100vh;
-}
-
-/* 메인 메뉴 카드 스타일 */
-.menu-container {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 20px;
-    width: 90%;
-    max-width: 1000px;
-    margin-top: 50px;
-}
-
-.game-card {
-    background: var(--card-bg);
-    border-radius: 16px;
-    padding: 30px;
-    text-align: center;
-    transition: transform 0.3s ease, box-shadow 0.3s ease;
-    border: 1px solid rgba(255,255,255,0.1);
-    text-decoration: none;
-    color: inherit;
-}
-
-.game-card:hover {
-    transform: translateY(-10px);
-    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
-    border-color: var(--primary);
-}
-
-.game-card h2 { margin: 15px 0; color: var(--primary); }
-.game-card p { opacity: 0.7; font-size: 0.9rem; line-height: 1.5; }
-.emoji { font-size: 3rem; }
-
-/* 게임 화면 레이아웃 */
-.game-header {
-    width: 100%;
-    padding: 20px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    box-sizing: border-box;
-    background: rgba(30, 41, 59, 0.8);
-    backdrop-filter: blur(10px);
-    position: sticky;
-    top: 0;
-}
-
-.canvas-container {
-    position: relative;
-    margin-top: 20px;
-    border-radius: 12px;
-    overflow: hidden;
-    box-shadow: 0 0 50px rgba(0,0,0,0.5);
-    border: 4px solid var(--card-bg);
-}
-
-.btn-back {
-    padding: 8px 16px;
-    background: var(--card-bg);
+    background: radial-gradient(circle at top, #1e293b, var(--bg-color));
     color: var(--text);
-    text-decoration: none;
-    border-radius: 8px;
-    font-size: 0.9rem;
+    font-family: Arial, sans-serif;
+    text-align: center;
 }
 
-.btn-back:hover { background: #334155; }
+a { color: inherit; text-decoration: none; }
+.menu-container {
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+    flex-wrap: wrap;
+    margin: 50px auto 20px;
+    max-width: 1100px;
+}
+.game-card {
+    width: 310px;
+    min-height: 230px;
+    border-radius: 22px;
+    background: rgba(15, 23, 42, 0.78);
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    padding: 30px;
+    text-align: left;
+    box-shadow: 0 18px 40px rgba(0,0,0,0.25);
+    transition: transform .15s ease, border-color .15s ease;
+}
+.game-card:hover { transform: translateY(-5px); border-color: var(--primary); }
+.game-card .emoji { font-size: 46px; margin-bottom: 12px; }
+.game-card h2 { margin: 0 0 10px; font-size: 26px; }
+.game-card p { color: var(--muted); line-height: 1.5; margin: 0; }
+
+.game-header {
+    height: 72px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 30px;
+    background: rgba(15, 23, 42, 0.85);
+    border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+}
+.btn-back, .btn {
+    display: inline-block;
+    padding: 10px 16px;
+    background: var(--panel2);
+    border: 1px solid rgba(148, 163, 184, 0.28);
+    border-radius: 12px;
+    color: var(--text);
+}
+.btn-primary { background: var(--primary); color: #082f49; font-weight: 700; }
+.canvas-container { display: flex; justify-content: center; align-items: center; min-height: calc(100vh - 72px); }
+canvas {
+    background: rgba(15, 23, 42, 0.75);
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    border-radius: 22px;
+    box-shadow: 0 22px 50px rgba(0,0,0,0.35);
+}
+.kbd {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: #334155;
+    border: 1px solid #475569;
+    color: white;
+    font-size: 0.9em;
+}
