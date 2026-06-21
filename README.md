@@ -8,7 +8,7 @@
 
 - **목적**: 신체적 제약이 있는 사용자나 손을 쓰기 어려운 상황에서도, 웹캠만으로 PC를 완전히 핸즈프리로 제어할 수 있는 접근성 솔루션을 제공합니다.
 - **해결 과제**: 초기에는 Flask-SocketIO 기반 WebSocket으로 시선 좌표를 웹 클라이언트에 전송하는 방식을 시도했으나, 서버 수동 실행과 복잡한 프론트엔드 파싱 로직이 필요했고 동기화 문제로 범용성이 떨어졌습니다. 이를 해결하기 위해 **OS 레벨 커서 주입(`pyautogui`)** 방식으로 전환하여, 별도 설정 없이 모든 브라우저·프로그램에서 동작하도록 구조를 재설계했습니다.
-- **최종 결과**: 단일 Python 실행 파일로 즉시 구동되는 시선 추적 시스템과, 이를 활용해 플레이할 수 있는 5종의 웹 기반 미니게임(Eye Maze, Number Grid, Fruit Slicer, Sniper Dwell, Rhythm Tracker)을 제작했습니다.
+- **최종 결과**: 단일 Python 실행 파일로 즉시 구동되는 시선 추적 시스템과, 이를 활용해 플레이할 수 있는 2종의 웹 기반 미니게임(Eye Maze, Number Grid)을 제작했습니다.
 
 ### 🛠 주요 기술 및 기능
 
@@ -31,7 +31,7 @@
 
 - **Goal**: Provide a fully automated, hands-free interaction environment using only a standard webcam, for users with physical disabilities or situations where manual input is restricted.
 - **Problem Solving**: Early prototypes relied on a Flask-SocketIO WebSocket pipeline to transmit gaze coordinates to the web client. This required manual server execution, complex frontend parsing, and suffered from synchronization issues with no universal compatibility. We pivoted to **OS-level cursor injection (`pyautogui`)**, eliminating the network layer entirely and making the tracker work system-wide, out-of-the-box.
-- **Final Results**: A single-script Python application that instantly activates hands-free PC control, paired with five browser-based mini-games (Eye Maze, Number Grid, Fruit Slicer, Sniper Dwell, Rhythm Tracker) that demonstrate gaze-driven interaction.
+- **Final Results**: A single-script Python application that instantly activates hands-free PC control, paired with two browser-based mini-games (Eye Maze, Number Grid) that demonstrate gaze-driven interaction.
 
 ### 🛠 Key Features
 
@@ -42,7 +42,7 @@
 - **Dwell-Click & Visual Feedback**: Fixating within a 30-pixel radius for 1.2 seconds triggers a left-click, visualized through a transparent, click-through PyQt5 overlay rendering a circular progress gauge.
 - **Multithreaded Architecture**: A dedicated `QThread` (`GazeThread`) isolates the OpenCV/MediaPipe processing loop from the PyQt5 UI thread, ensuring zero-latency tracking and smooth overlay rendering.
 - **Mouth-Gesture Safety Toggle**: Opening the mouth locks/unlocks cursor movement for added stability.
-- **Web Mini-Games**: Five browser games (Eye Maze, Number Grid, Fruit Slicer, Sniper Dwell, Rhythm Tracker) driven entirely by native `mousemove`/`click` events — no custom socket logic required.
+- **Web Mini-Games**: two browser games (Eye Maze, Number Grid) driven entirely by native `mousemove`/`click` events — no custom socket logic required.
 
 ---
 
@@ -60,9 +60,9 @@ GazeQuest/
 │   ├── games/
 │   │   ├── eye-maze/
 │   │   ├── number-grid/
-│   │   ├── fruit/
-│   │   ├── sniper/
-│   │   └── rhythm/
+│   │   ├── fruit/            # demo (not implement)
+│   │   ├── sniper/           # demo (not implement)
+│   │   └── rhythm/           # demo (not implement)
 │   ├── report/               # Demo result dashboard
 │   └── index.html            # Game selection menu
 ├── face_landmarker.task       # MediaPipe model file
