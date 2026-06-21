@@ -1,4 +1,4 @@
-# GazeQuest: A Hands-Free Web Gaming Platform using Real-Time Eye Tracking
+# GazeQuest: A Hands-Free Interaction Platform using Real-Time Webcam Eye Tracking
 
 ## 🇰🇷 국문 요약 (Korean)
 
