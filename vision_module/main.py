@@ -7,6 +7,7 @@ import mediapipe as mp
 import time
 import pyautogui
 import signal
+import keyboard
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from PyQt5.QtWidgets import QApplication, QWidget
@@ -321,7 +322,7 @@ if __name__ == "__main__":
     print(" [2단계] 투명 오버레이 실시간 추적 모드 진입")
     print(" 웹캠 창이 숨겨지고 바탕화면 모드로 작동합니다.")
     print(" 마우스를 특정 위치에 1.2초간 고정하면 파란 원이 차오르며 클릭됩니다.")
-    print(" 종료하려면 터미널에서 Ctrl+C 를 누르세요.")
+    print(" 종료하려면 f8을 누르거나 터미널에서 Ctrl+C 를 누르세요.")
     print("==================================================")
 
     # --- 2단계: 백그라운드 추적 및 투명 오버레이 렌더링 (PyQt5) ---
@@ -329,6 +330,7 @@ if __name__ == "__main__":
     
     overlay = TransparentOverlay()
     overlay.show()
+    keyboard.add_hotkey('f8', app.quit)
 
     gaze_thread = GazeThread(cap, calib)
     gaze_thread.update_overlay_signal.connect(overlay.update_overlay) # 스레드와 UI 연결
