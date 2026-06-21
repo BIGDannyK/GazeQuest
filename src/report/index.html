@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>GazeQuest Demo Report</title>
+    <link rel="stylesheet" href="../style.css">
+    <style>
+        body { padding: 40px; text-align: left; }
+        .container { max-width: 1050px; margin: 0 auto; background: rgba(15,23,42,0.82); padding: 30px; border-radius: 20px; border: 1px solid rgba(148,163,184,0.25); }
+        h1 { margin-top: 0; }
+        .summary-card { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 16px; margin: 22px 0; }
+        .card { background: #1f2937; padding: 18px; border-radius: 14px; text-align: center; }
+        .card h3 { margin: 0; color: var(--muted); font-size: 14px; }
+        .card p { margin: 8px 0 0; font-size: 26px; font-weight: bold; color: var(--primary); }
+        table { width: 100%; border-collapse: collapse; margin-top: 18px; }
+        th, td { padding: 12px; border-bottom: 1px solid rgba(148,163,184,0.22); }
+        th { color: var(--accent); }
+        .btn-danger { background: var(--danger); color: white; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📊 GazeQuest Demo Report</h1>
+        <p style="color:var(--muted);">Eye Maze와 Number Grid의 시연 결과가 localStorage에 저장됩니다.</p>
+        <div class="summary-card" id="summary"></div>
+        <h3>최근 게임 기록</h3>
+        <table id="historyTable">
+            <thead>
+                <tr>
+                    <th>날짜</th>
+                    <th>게임</th>
+                    <th>시간</th>
+                    <th>샘플</th>
+                    <th>결과 요약</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+        <div style="display:flex; gap:10px; margin-top:20px;">
+            <a href="../index.html" class="btn">◀ 메인으로</a>
+            <button onclick="clearHistory()" class="btn btn-danger">데이터 초기화</button>
+        </div>
+    </div>
+
+    <script>
+        function summaryText(session) {
+            const m = session.metrics || {};
+            if (session.game === 'eye-maze') {
+                return `Moves ${m.moves ?? '-'}, Wall Hits ${m.wallHits ?? '-'}, Clear ${Number(m.clearTime ?? session.duration).toFixed(1)}s`;
+            }
+            if (session.game === 'number-grid') {
+                return `Moves ${m.moves ?? '-'}, Selects ${m.selects ?? '-'}, Wrong ${m.wrong ?? '-'}, Complete ${Number(m.completeTime ?? session.duration).toFixed(1)}s`;
+            }
+            return `${session.events?.length ?? 0} events`;
+        }
+
+        function loadReport() {
+            const history = JSON.parse(localStorage.getItem('game_history') || '[]');
+            const tableBody = document.querySelector('#historyTable tbody');
+            const summaryDiv = document.getElementById('summary');
+
+            if (history.length === 0) {
+                summaryDiv.innerHTML = '<div class="card"><h3>기록</h3><p>0</p></div>';
+                tableBody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:var(--muted);">기록이 없습니다. 게임을 먼저 플레이하세요.</td></tr>';
+                return;
+            }
+
+            const latest = history[history.length - 1];
+            const eyeCount = history.filter(s => s.game === 'eye-maze').length;
+            const numberCount = history.filter(s => s.game === 'number-grid').length;
+            summaryDiv.innerHTML = `
+                <div class="card"><h3>총 플레이</h3><p>${history.length}</p></div>
+                <div class="card"><h3>Eye Maze</h3><p>${eyeCount}</p></div>
+                <div class="card"><h3>Number Grid</h3><p>${numberCount}</p></div>
+                <div class="card"><h3>최근 게임</h3><p>${latest.game}</p></div>
+            `;
+
+            [...history].reverse().forEach(session => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${new Date(session.date).toLocaleString()}</td>
+                    <td><b>${session.game}</b></td>
+                    <td>${Number(session.duration || 0).toFixed(1)}s</td>
+                    <td>${session.samples?.length ?? 0}</td>
+                    <td>${summaryText(session)}</td>
+                `;
+                tableBody.appendChild(row);
+            });
+        }
+
+        function clearHistory() {
+            if (confirm('모든 기록을 삭제할까요?')) {
+                localStorage.removeItem('game_history');
+                location.reload();
+            }
+        }
+        window.onload = loadReport;
+    </script>
+</body>
+</html>
